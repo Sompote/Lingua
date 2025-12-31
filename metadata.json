@@ -1,5 +1,5 @@
 {
-  "name": "Gemini Live Translator",
+  "name": "LINGUA",
   "description": "A professional-grade real-time voice translator optimized for Bluetooth headphones, powered by Gemini 2.5 Flash Native Audio.",
   "requestFramePermissions": [
     "microphone"

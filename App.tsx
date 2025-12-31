@@ -14,7 +14,8 @@ import {
   RefreshCw,
   AlertCircle,
   Activity,
-  ChevronDown
+  ChevronDown,
+  Languages
 } from 'lucide-react';
 import { SUPPORTED_LANGUAGES, Language } from './types';
 import { decode, decodeAudioData, createBlob } from './utils/audio-utils';
@@ -57,9 +58,7 @@ const App: React.FC = () => {
       const devices = await navigator.mediaDevices.enumerateDevices();
       const inputs = devices.filter(d => d.kind === 'audioinput');
       setAudioInputDevices(inputs);
-      // Auto-select if none selected
       if (!userInputDeviceId && inputs.length > 0) {
-        // Prefer bluetooth if available in label
         const bt = inputs.find(i => i.label.toLowerCase().includes('bluetooth') || i.label.toLowerCase().includes('headset'));
         if (bt) setUserInputDeviceId(bt.deviceId);
       }
@@ -88,7 +87,6 @@ const App: React.FC = () => {
       setStatus('connecting');
       setErrorMessage('');
 
-      // Stop any existing tracks first
       streamsRef.current.forEach(s => s.getTracks().forEach(t => t.stop()));
 
       const constraints = {
@@ -122,18 +120,16 @@ const App: React.FC = () => {
             proc.connect(inCtx.destination);
           },
           onmessage: async (message: LiveServerMessage) => {
-            // Transcript handling for UI Routing
             if (message.serverContent?.outputTranscription) {
               const textChunk = message.serverContent.outputTranscription.text;
               transcriptionBuffer.current += textChunk;
 
-              // Force channel switch based on tags
               if (transcriptionBuffer.current.includes('[USER_UI]')) {
                 currentTargetChannel.current = 'user';
                 const parts = transcriptionBuffer.current.split('[USER_UI]');
                 const actualText = parts[parts.length - 1].trim();
                 setLiveUserText(actualText);
-                setLiveGuestText(''); // Clean guest panel
+                setLiveGuestText(''); 
                 transcriptionBuffer.current = actualText; 
               } 
               else if (transcriptionBuffer.current.includes('[GUEST_UI]')) {
@@ -141,7 +137,7 @@ const App: React.FC = () => {
                 const parts = transcriptionBuffer.current.split('[GUEST_UI]');
                 const actualText = parts[parts.length - 1].trim();
                 setLiveGuestText(actualText);
-                setLiveUserText(''); // Clean user panel
+                setLiveUserText(''); 
                 transcriptionBuffer.current = actualText;
               } 
               else if (currentTargetChannel.current === 'user') {
@@ -156,7 +152,6 @@ const App: React.FC = () => {
               transcriptionBuffer.current = '';
             }
 
-            // Audio output handling
             const base64 = message.serverContent?.modelTurn?.parts?.find(p => p.inlineData)?.inlineData?.data;
             if (base64 && outCtxRef.current) {
               const ctx = outCtxRef.current;
@@ -202,16 +197,13 @@ STRICT ROUTING RULES:
 1. If you hear ${userLang.name} (from the User):
    - You MUST translate it into ${guestLang.name}.
    - You MUST start your response with the tag [GUEST_UI].
-   - This output will appear in the Guest's (Top) panel.
    
 2. If you hear ${guestLang.name} (from the Guest):
    - You MUST translate it into ${userLang.name}.
    - You MUST start your response with the tag [USER_UI].
-   - This output will appear in the User's (Bottom) panel.
 
 STRICT FORBIDDEN ACTIONS:
 - DO NOT repeat what was said in the original language.
-- DO NOT say "They said..." or "The Guest says...".
 - ONLY output the translated text.
 - NEVER mix up the tags. [GUEST_UI] is for translations TO the Guest. [USER_UI] is for translations TO the User.
 
@@ -230,6 +222,14 @@ Your goal is fluid, accurate, and properly routed conversation.`,
   return (
     <div className="flex flex-col h-screen max-w-2xl mx-auto bg-slate-950 text-slate-100 overflow-hidden relative font-sans select-none">
       
+      {/* FLOATING BRANDING LOGO - TOP LEFT */}
+      <div className="absolute top-6 left-6 z-[60] flex items-center gap-3 bg-slate-900/50 backdrop-blur-xl border border-white/5 py-2 px-4 rounded-2xl shadow-2xl">
+        <div className="bg-blue-600 p-1.5 rounded-lg shadow-[0_0_15px_rgba(37,99,235,0.5)]">
+          <Languages className="w-4 h-4 text-white" />
+        </div>
+        <span className="text-sm font-black tracking-[0.2em] uppercase text-white drop-shadow-md">Lingua</span>
+      </div>
+
       {/* TOP PANEL: GUEST VIEW (Flipped if isFlipped) */}
       <div className={`relative flex-1 flex flex-col items-center justify-center p-12 transition-all duration-1000 ${isFlipped ? 'rotate-180' : ''} ${status === 'translating' && currentTargetChannel.current === 'guest' ? 'bg-blue-600/10' : 'bg-slate-950'}`}>
         <div className="absolute top-10 left-1/2 -translate-x-1/2 z-20 flex flex-col items-center gap-3">
@@ -252,35 +252,36 @@ Your goal is fluid, accurate, and properly routed conversation.`,
       </div>
 
       {/* MID PANEL: MAIN CONTROLS */}
-      <div className="h-40 bg-slate-900/90 backdrop-blur-3xl border-y border-slate-800/50 flex items-center justify-between px-8 relative z-40 shadow-[0_0_100px_rgba(0,0,0,1)]">
-        <button onClick={() => setIsFlipped(!isFlipped)} className={`w-14 h-14 rounded-full flex items-center justify-center transition-all active:scale-90 border ${isFlipped ? 'bg-blue-600 border-blue-400 shadow-[0_0_20px_rgba(37,99,235,0.4)]' : 'bg-slate-800 border-slate-700 text-slate-500'}`}>
-          <RotateCcw className="w-6 h-6" />
-        </button>
-
-        <div className="relative flex flex-col items-center">
-          <button 
-            onClick={isActive ? stopSession : startSession} 
-            disabled={status === 'connecting'} 
-            className={`w-28 h-28 rounded-full flex items-center justify-center border-[10px] border-slate-950 -mt-20 transition-all shadow-2xl relative ${isActive ? 'bg-red-500 ring-4 ring-red-500/20' : 'bg-blue-600 hover:scale-105 active:scale-95 ring-4 ring-blue-600/20'}`}
-          >
-            {status === 'connecting' ? <RefreshCw className="w-10 h-10 animate-spin text-white" /> : isActive ? <MicOff className="w-10 h-10 text-white" /> : <Mic className="w-10 h-10 text-white" />}
+      <div className="h-40 bg-slate-900/90 backdrop-blur-3xl border-y border-slate-800/50 flex flex-col relative z-40 shadow-[0_0_100px_rgba(0,0,0,1)]">
+        <div className="flex-1 flex items-center justify-between px-8 relative">
+          <button onClick={() => setIsFlipped(!isFlipped)} className={`w-14 h-14 rounded-full flex items-center justify-center transition-all active:scale-90 border ${isFlipped ? 'bg-blue-600 border-blue-400 shadow-[0_0_20px_rgba(37,99,235,0.4)]' : 'bg-slate-800 border-slate-700 text-slate-500'}`}>
+            <RotateCcw className="w-6 h-6" />
           </button>
-          
-          {/* MICROPHONE QUICK SELECT */}
-          <div className="mt-4 flex flex-col items-center gap-1">
-             <div className="flex items-center gap-2 px-3 py-1 bg-slate-800 rounded-full border border-slate-700 cursor-pointer hover:bg-slate-700 transition-colors" onClick={() => setShowSettings(true)}>
-                <Bluetooth className={`w-3 h-3 ${userInputDeviceId ? 'text-blue-400' : 'text-slate-500'}`} />
-                <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest truncate max-w-[120px]">
-                  {audioInputDevices.find(d => d.deviceId === userInputDeviceId)?.label || 'Internal Mic'}
-                </span>
-             </div>
-             {isActive && <Activity className="w-4 h-4 text-blue-500 animate-pulse mt-1" />}
-          </div>
-        </div>
 
-        <button onClick={() => { refreshDevices(); setShowSettings(true); }} className={`w-14 h-14 rounded-full flex items-center justify-center transition-all active:scale-90 border ${showSettings ? 'bg-white text-black border-white shadow-[0_0_20px_rgba(255,255,255,0.3)]' : 'bg-slate-800 border-slate-700 text-slate-500'}`}>
-          <Settings className="w-6 h-6" />
-        </button>
+          <div className="relative flex flex-col items-center">
+            <button 
+              onClick={isActive ? stopSession : startSession} 
+              disabled={status === 'connecting'} 
+              className={`w-28 h-28 rounded-full flex items-center justify-center border-[10px] border-slate-950 -mt-24 transition-all shadow-2xl relative ${isActive ? 'bg-red-500 ring-4 ring-red-500/20' : 'bg-blue-600 hover:scale-105 active:scale-95 ring-4 ring-blue-600/20'}`}
+            >
+              {status === 'connecting' ? <RefreshCw className="w-10 h-10 animate-spin text-white" /> : isActive ? <MicOff className="w-10 h-10 text-white" /> : <Mic className="w-10 h-10 text-white" />}
+            </button>
+            
+            <div className="mt-4 flex flex-col items-center gap-1">
+               <div className="flex items-center gap-2 px-3 py-1 bg-slate-800 rounded-full border border-slate-700 cursor-pointer hover:bg-slate-700 transition-colors" onClick={() => setShowSettings(true)}>
+                  <Bluetooth className={`w-3 h-3 ${userInputDeviceId ? 'text-blue-400' : 'text-slate-500'}`} />
+                  <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest truncate max-w-[120px]">
+                    {audioInputDevices.find(d => d.deviceId === userInputDeviceId)?.label || 'Internal Mic'}
+                  </span>
+               </div>
+               {isActive && <Activity className="w-4 h-4 text-blue-500 animate-pulse mt-1" />}
+            </div>
+          </div>
+
+          <button onClick={() => { refreshDevices(); setShowSettings(true); }} className={`w-14 h-14 rounded-full flex items-center justify-center transition-all active:scale-90 border ${showSettings ? 'bg-white text-black border-white shadow-[0_0_20px_rgba(255,255,255,0.3)]' : 'bg-slate-800 border-slate-700 text-slate-500'}`}>
+            <Settings className="w-6 h-6" />
+          </button>
+        </div>
       </div>
 
       {/* BOTTOM PANEL: USER VIEW */}
@@ -308,9 +309,14 @@ Your goal is fluid, accurate, and properly routed conversation.`,
       {showSettings && (
         <div className="absolute inset-0 bg-slate-950/98 z-[100] p-10 flex flex-col animate-in slide-in-from-bottom-10 duration-500 backdrop-blur-3xl">
           <div className="flex justify-between items-center mb-10">
-            <div>
-              <h2 className="text-3xl font-black italic tracking-tighter uppercase text-white">Audio Settings</h2>
-              <div className="h-1 w-10 bg-blue-600 mt-2 rounded-full"></div>
+            <div className="flex items-center gap-3">
+              <div className="bg-blue-600 p-2 rounded-xl">
+                <Languages className="w-6 h-6 text-white" />
+              </div>
+              <div>
+                <h2 className="text-3xl font-black italic tracking-tighter uppercase text-white">Audio Settings</h2>
+                <p className="text-[10px] font-bold text-blue-500 tracking-widest uppercase">Lingua Pro Translator</p>
+              </div>
             </div>
             <button onClick={() => setShowSettings(false)} className="p-4 bg-slate-900 rounded-full text-slate-400 border border-slate-800 hover:text-white transition-colors"><Trash2 className="w-6 h-6 rotate-45" /></button>
           </div>
@@ -341,15 +347,17 @@ Your goal is fluid, accurate, and properly routed conversation.`,
                     <ChevronDown className="absolute right-5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500 pointer-events-none" />
                   </div>
                   <p className="text-[10px] text-slate-500 italic px-2">
-                    Pro tip: Connect Bluetooth headphones before selecting them here.
+                    Pro tip: Connect Bluetooth headphones before selecting them here for best results.
                   </p>
                </div>
             </div>
 
             <div className="p-8 bg-slate-900/50 border border-slate-800 rounded-[35px] flex flex-col gap-4">
-                <div className="flex items-center gap-2 text-slate-500"><Info className="w-4 h-4" /><span className="text-[10px] font-black uppercase tracking-widest">Routing Stability</span></div>
+                <div className="flex items-center gap-2 text-slate-500"><Info className="w-4 h-4" /><span className="text-[10px] font-black uppercase tracking-widest">About Lingua</span></div>
                 <p className="text-[11px] text-slate-600 leading-relaxed font-medium">
-                  We've implemented strict UI tags to separate User and Guest channels. If you speak {userLang.name}, the translation is locked to the Guest's panel. If they speak {guestLang.name}, it's locked to your panel.
+                  Lingua utilizes Gemini 2.5 Flash for ultra-low latency translation. 
+                  We've implemented strict UI tags to separate User and Guest channels. 
+                  The bottom panel is dedicated to you, while the top panel is for your guest.
                 </p>
             </div>
           </div>
