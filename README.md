@@ -11,12 +11,13 @@
 - **Live Transcription**: Displays real-time transcripts for both participants, ensuring clarity even in noisy environments.
 - **Minimalist Aesthetic**: Features a high-contrast dark theme with a prominent "Lingua" brand identity in the upper-left corner for professional appeal.
 
-## 📸 Screenshots
+## 📸 Screenshot
 
-| Main Application View | Microphone Selector |
-| :---: | :---: |
-| ![Main App View](Screenshot%202568-12-31%20at%2013.27.13.png) | ![Microphone Selector](Screenshot%202568-12-31%20at%2013.27.21.png) |
-| *Face-to-face layout with flipped guest panel* | *Mic selection optimized for Bluetooth headsets* |
+<p align="center">
+  <img src="Screenshot%202568-12-31%20at%2013.27.13.png" alt="Main App View" width="600px">
+  <br>
+  <em>Main Application View: Face-to-face layout with flipped guest panel for seamless interaction.</em>
+</p>
 
 ## 🛠 Tech Stack
 
