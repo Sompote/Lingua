@@ -15,7 +15,7 @@
 
 | Main Application View | Microphone Selector |
 | :---: | :---: |
-| ![Main App View](<Screenshot 2568-12-31 at 13.27.13.png>) | ![Microphone Selector](<Screenshot 2568-12-31 at 13.27.21.png>) |
+| ![Main App View](Screenshot%202568-12-31%20at%2013.27.13.png) | ![Microphone Selector](Screenshot%202568-12-31%20at%2013.27.21.png) |
 | *Face-to-face layout with flipped guest panel* | *Mic selection optimized for Bluetooth headsets* |
 
 ## 🛠 Tech Stack
