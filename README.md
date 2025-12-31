@@ -14,7 +14,7 @@
 ## 📸 Screenshot
 
 <p align="center">
-  <img src="Screenshot%202568-12-31%20at%2013.27.13.png" alt="Main App View" width="600px">
+  <img src="Screenshot%202568-12-31%20at%2013.27.13.jpg" alt="Main App View" width="600px">
   <br>
   <em>Main Application View: Face-to-face layout with flipped guest panel for seamless interaction.</em>
 </p>
