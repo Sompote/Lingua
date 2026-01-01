@@ -14,11 +14,9 @@
 
 ## 📸 Screenshot
 
-<p align="center">
-  <img src="./Screenshot%202568-12-31%20at%2013.27.13.png" alt="lingual.ai Screenshot" width="400">
-  <br>
-  <em>Main Application View: Face-to-face layout with flipped guest panel for seamless interaction.</em>
-</p>
+![lingual.ai Screenshot](Screenshot%202568-12-31%20at%2013.27.13.png)
+
+*Main Application View: Face-to-face layout with flipped guest panel for seamless interaction.*
 
 ## 🛠 Tech Stack
 
