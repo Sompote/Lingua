@@ -1,22 +1,20 @@
+# 🌍 LINGUA - Real-Time AI Voice Translator
 
-# 🌍 lingual.ai - Real-Time AI Voice Translator
-
-**lingual.ai** is a professional-grade, low-latency voice translation application designed for fluid face-to-face conversations. Powered by the **Gemini 2.5 Flash Native Audio** model, it provides near-instant translation with high linguistic accuracy and intelligent UI routing.
+**LINGUA** is a professional-grade, low-latency voice translation application designed for fluid face-to-face conversations. Powered by the **Gemini 2.5 Flash Native Audio** model, it provides near-instant translation with high linguistic accuracy and intelligent UI routing.
 
 ## ✨ Key Features
 
 - **Gemini Live Integration**: Utilizes the `@google/genai` Live API for continuous, real-time audio processing and natural-sounding speech output.
 - **Dual-Panel Interface**: Features a unique "Face-to-Face" mode where the top panel (Guest) can be flipped 180 degrees, allowing two people to stand opposite each other and read translations comfortably.
-- **Intelligent Routing**: Automatically maps translations to the correct panel using metadata tags. User speech is translated and routed to the Guest (top) panel, while Guest speech is translated and routed to the User (bottom) panel.
-- **Bluetooth Optimization**: Built specifically for travelers and professionals using Bluetooth headphones. Includes a dedicated device selector to switch between internal microphones and connected headsets seamlessly.
-- **Live Subtitle-Style Display**: Shows only the latest translation for each person to keep the interface clean and clutter-free.
-- **Minimalist Aesthetic**: Features a high-contrast dark theme with a prominent **lingual.ai** brand identity.
+- **Intelligent Routing**: Automatically maps translations to the correct panel using metadata tags. User speech is translated to the Guest panel, while Guest speech is translated to the User panel.
+- **Bluetooth Optimization**: Includes a dedicated device selector to switch between internal microphones and connected Bluetooth headsets seamlessly, ensuring clear audio capture in any environment.
+- **Minimalist Aesthetic**: Features a high-contrast premium dark theme with a clean, typography-focused interface as seen in the screenshot below.
 
 ## 📸 Screenshot
 
-![lingual.ai Screenshot](Screenshot%202568-12-31%20at%2013.27.13.png)
+![LINGUA Application View](screenshot.png)
 
-*Main Application View: Face-to-face layout with flipped guest panel for seamless interaction.*
+*Main Application View: Minimalist face-to-face layout with flipped guest panel and real-time status indicators.*
 
 ## 🛠 Tech Stack
 
@@ -24,7 +22,7 @@
 - **Styling**: Tailwind CSS
 - **AI Engine**: [Google Gemini API](https://ai.google.dev/) (`gemini-2.5-flash-native-audio-preview-09-2025`)
 - **Icons**: Lucide React
-- **Audio Processing**: Web Audio API
+- **Audio Processing**: Web Audio API (ScriptProcessorNode, AudioContext)
 
 ## 🚀 Getting Started
 
@@ -38,10 +36,11 @@ The application expects the following environment variable to be available:
 
 ## 📖 How to Use
 
-1. **Select Languages**: Use the flag dropdowns at the top and bottom to set the languages.
-2. **Setup Audio**: Click the **Settings** or **Bluetooth** badge to select your microphone source.
-3. **Start Translating**: Tap the large central **Mic** button.
-4. **Flip for Guest**: Use the **Rotate** button to flip the guest panel for easier reading.
+1. **Select Languages**: Use the selectors at the top and bottom to set the languages for both participants.
+2. **Setup Audio**: Click the **Internal Mic / Bluetooth** badge or the **Settings** icon to select your microphone source.
+3. **Start Translating**: Tap the large central **Mic** button. The app will transition to "LISTENING..." mode.
+4. **Natural Conversation**: Simply speak. **LINGUA** handles the detection and routing automatically.
+5. **Flip for Guest**: Use the **Rotate** button on the left to flip the top panel 180 degrees for your conversation partner.
 
 ---
 *Built with ❤️ using Gemini 2.5 Flash*
