@@ -12,7 +12,7 @@
 
 ## 📸 Screenshot
 
-![LINGUA Application View](screenshot.png)
+![LINGUA Application View](Screenshot%202569-01-02%20at%2008.13.23.png)
 
 *Main Application View: Minimalist face-to-face layout with flipped guest panel and real-time status indicators.*
 

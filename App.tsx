@@ -154,9 +154,6 @@ const App: React.FC = () => {
     }
   };
 
-  /**
-   * Cleanup only the stream-dependent nodes, keeping the context alive if possible
-   */
   const cleanupNodes = () => {
     if (processorRef.current) {
       processorRef.current.disconnect();
@@ -167,30 +164,21 @@ const App: React.FC = () => {
       sourceRef.current.disconnect();
       sourceRef.current = null;
     }
-    // Stop tracks
     streamsRef.current.forEach(s => s.getTracks().forEach(t => t.stop()));
     streamsRef.current = [];
-    
-    // Clear session
     sessionRef.current = null;
   };
 
-  /**
-   * Full reset including context (used for unmounting or critical errors)
-   */
   const fullDisconnect = async () => {
     cleanupNodes();
-    
     if (oscillatorRef.current) {
       try { oscillatorRef.current.stop(); } catch(e){}
       oscillatorRef.current = null;
     }
-
     if (audioCtxRef.current) {
       try { await audioCtxRef.current.close(); } catch(e) {}
       audioCtxRef.current = null;
     }
-    
     activeSources.current.forEach(s => { try { s.stop(); } catch(e) {} });
     activeSources.current.clear();
     processingBuffer.current = '';
@@ -225,32 +213,21 @@ const App: React.FC = () => {
   };
 
   const startSession = async (inputDeviceIdOverride?: string, outputDeviceIdOverride?: string) => {
-    // We do NOT fully disconnect here to preserve the AudioContext gesture token.
-    // Instead, we clean up the nodes and streams, then re-initialize the graph.
     cleanupNodes();
-
     try {
       setStatus('connecting');
       setErrorMessage('');
-      
       const targetInputId = inputDeviceIdOverride || userInputDeviceId;
       const targetOutputId = outputDeviceIdOverride || userOutputDeviceId;
-      
-      // --- AUDIO CONTEXT SETUP (Reuse or Create) ---
       let ctx = audioCtxRef.current;
       const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-      
       if (!ctx || ctx.state === 'closed') {
         ctx = new AudioContextClass({ latencyHint: 'interactive' });
         audioCtxRef.current = ctx;
       }
-      
-      // Always try to resume (required for iOS after interruptions)
       if (ctx.state === 'suspended') {
         await ctx.resume();
       }
-
-      // --- KEEP-ALIVE OSCILLATOR (If not running) ---
       if (!oscillatorRef.current) {
          try {
             const silentOsc = ctx.createOscillator();
@@ -264,41 +241,26 @@ const App: React.FC = () => {
             oscillatorRef.current = silentOsc;
          } catch (e) { console.warn("Oscillator failed", e); }
       }
-
-      // --- INPUT CONSTRAINT STRATEGY ---
       let stream: MediaStream | null = null;
       const constraintsPreferences = [
-         // 1. Try exact ID
          { audio: { deviceId: targetInputId ? { exact: targetInputId } : undefined, channelCount: 1, echoCancellation: true, autoGainControl: true, noiseSuppression: true }},
-         // 2. Try ideal ID
          { audio: { deviceId: targetInputId ? { ideal: targetInputId } : undefined, channelCount: 1, echoCancellation: true }},
-         // 3. Fallback to any mic
          { audio: { echoCancellation: true }}
       ];
-
       for (const constraint of constraintsPreferences) {
          try {
-            // Skip if this preference requires an ID but we don't have one
             if (targetInputId && !constraint.audio.deviceId && !constraint.audio.echoCancellation) continue;
-            
             stream = await navigator.mediaDevices.getUserMedia(constraint);
-            console.log("Connected with constraints:", JSON.stringify(constraint));
             break; 
          } catch (e) {
-            console.log("Constraint failed:", constraint);
             stream = null;
          }
       }
-
       if (!stream) throw new Error("Could not access microphone.");
       streamsRef.current = [stream];
-
-      // --- OUTPUT ROUTING ---
       if (targetOutputId) {
         await applyOutputDevice(ctx, targetOutputId);
       }
-
-      // --- GEMINI CONNECTION ---
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       const sessionPromise = ai.live.connect({
         model: 'gemini-2.5-flash-native-audio-preview-09-2025',
@@ -306,41 +268,26 @@ const App: React.FC = () => {
           onopen: () => {
             setStatus('listening');
             if (!ctx) return; 
-
-            // Create new nodes
             const source = ctx.createMediaStreamSource(stream!);
             const processor = ctx.createScriptProcessor(4096, 1, 1);
-            
-            // Store references for cleanup
             sourceRef.current = source;
             processorRef.current = processor;
-
             source.connect(processor);
             processor.connect(ctx.destination);
-
             let lastVolumeUpdate = 0;
             const NOISE_GATE_THRESHOLD = 0.01;
-
             processor.onaudioprocess = (e) => {
               const inputData = e.inputBuffer.getChannelData(0);
               const outputData = e.outputBuffer.getChannelData(0);
-
-              // 1. Viz
               let sum = 0;
               for (let i = 0; i < inputData.length; i++) sum += inputData[i] * inputData[i];
               const rms = Math.sqrt(sum / inputData.length);
               const now = Date.now();
-              // Update more frequently for smoother bar (50ms)
               if (now - lastVolumeUpdate > 50) {
-                 // Increased sensitivity (x10) for bar visibility
                  setVolumeLevel(Math.min(rms * 10, 1));
                  lastVolumeUpdate = now;
               }
-
-              // 2. Mute Local Output
               for (let i = 0; i < outputData.length; i++) outputData[i] = 0; 
-
-              // 3. Send to AI
               if (ctx) {
                 const downsampledData = downsampleTo16k(inputData, ctx.sampleRate);
                 sessionPromise.then((session) => {
@@ -357,19 +304,16 @@ const App: React.FC = () => {
             if (message.serverContent?.outputTranscription) {
               const chunk = message.serverContent.outputTranscription.text;
               processingBuffer.current += chunk;
-              
               while (true) {
                 const userTagIndex = processingBuffer.current.indexOf('[TO_USER]');
                 const guestTagIndex = processingBuffer.current.indexOf('[TO_GUEST]');
                 let foundIndex = -1;
                 let foundTag = '';
-
                 if (userTagIndex !== -1 && (guestTagIndex === -1 || userTagIndex < guestTagIndex)) {
                   foundIndex = userTagIndex; foundTag = '[TO_USER]';
                 } else if (guestTagIndex !== -1) {
                   foundIndex = guestTagIndex; foundTag = '[TO_GUEST]';
                 }
-
                 if (foundIndex === -1) {
                   if (currentTargetChannel.current && processingBuffer.current.length > 0) {
                      const text = processingBuffer.current;
@@ -384,7 +328,6 @@ const App: React.FC = () => {
                   }
                   break; 
                 }
-
                 const preText = processingBuffer.current.substring(0, foundIndex);
                 if (preText.length > 0 && currentTargetChannel.current) {
                    if (currentTargetChannel.current === 'user') {
@@ -395,7 +338,6 @@ const App: React.FC = () => {
                       setLiveGuestText(currentGuestTextRef.current);
                    }
                 }
-
                 if (foundTag === '[TO_USER]') {
                    currentTargetChannel.current = 'user';
                    currentUserTextRef.current = ''; 
@@ -408,30 +350,24 @@ const App: React.FC = () => {
                 processingBuffer.current = processingBuffer.current.substring(foundIndex + foundTag.length);
               }
             }
-
             if (message.serverContent?.interrupted) {
               activeSources.current.forEach(s => { try { s.stop(); } catch(e) {} });
               activeSources.current.clear();
               nextStartTimeRef.current = 0;
               setStatus('listening');
             }
-
             const base64 = message.serverContent?.modelTurn?.parts?.find(p => p.inlineData)?.inlineData?.data;
             if (base64 && audioCtxRef.current) {
               const ctx = audioCtxRef.current;
-              // Sync time if we fell behind or reset
               if (nextStartTimeRef.current < ctx.currentTime) nextStartTimeRef.current = ctx.currentTime;
-              
               const audioBuffer = await decodeAudioData(decode(base64), ctx, 24000, 1);
               const source = ctx.createBufferSource();
               source.buffer = audioBuffer;
               source.connect(ctx.destination);
-              
               source.start(nextStartTimeRef.current);
               nextStartTimeRef.current += audioBuffer.duration;
               activeSources.current.add(source);
               setStatus('translating');
-              
               source.onended = () => { 
                 activeSources.current.delete(source); 
                 if (activeSources.current.size === 0) setStatus('listening'); 
@@ -439,9 +375,7 @@ const App: React.FC = () => {
             }
           },
           onclose: () => {
-             // Just reset status, don't kill context unless user requested stop
              if (isActive) {
-               console.log("Socket closed unexpectedly");
                setStatus('error');
                setErrorMessage("Connection lost");
              }
@@ -469,7 +403,6 @@ RULES:
       sessionRef.current = await sessionPromise;
       setIsActive(true);
     } catch (e: any) { 
-      // Only if we failed to start, we might want to cleanup
       cleanupNodes();
       setStatus('error'); 
       setErrorMessage(e?.message || 'Mic Access Denied'); 
@@ -479,8 +412,6 @@ RULES:
   const handleInputSelection = async (deviceId: string) => {
     setUserInputDeviceId(deviceId);
     if (isActive) {
-      // HOT SWAP: Do not use setTimeout. Do not use stopSession().
-      // Call startSession directly to swap the stream while keeping context alive.
       await startSession(deviceId, userOutputDeviceId);
     }
   };
@@ -524,14 +455,22 @@ RULES:
       </div>
 
       {/* MID PANEL: CONTROLS */}
-      <div className="h-44 bg-slate-900/30 backdrop-blur-3xl border-y border-white/5 flex flex-col relative z-40 shadow-[0_0_100px_rgba(0,0,0,0.8)] shrink-0">
-        <div className="flex-1 flex items-center justify-between px-10 relative">
+      <div className="h-44 bg-slate-900/30 backdrop-blur-3xl border-y border-white/5 relative z-40 shadow-[0_0_100px_rgba(0,0,0,0.8)] shrink-0">
+        <div className="h-full grid grid-cols-3 px-10 items-center">
           
-          <button onClick={() => setIsFlipped(!isFlipped)} className={`w-14 h-14 rounded-full flex items-center justify-center transition-all active:scale-90 border border-white/10 ${isFlipped ? 'bg-blue-600 shadow-[0_0_30px_rgba(37,99,235,0.4)] text-white' : 'bg-slate-800/50 text-slate-400'}`}>
-            <RotateCcw className="w-6 h-6" />
-          </button>
+          {/* Left Column: Rotate */}
+          <div className="flex justify-start">
+            <button 
+              onClick={() => setIsFlipped(!isFlipped)} 
+              className={`w-14 h-14 rounded-full flex items-center justify-center transition-all active:scale-90 border border-white/10 ${isFlipped ? 'bg-blue-600 shadow-[0_0_30px_rgba(37,99,235,0.4)] text-white' : 'bg-slate-800/50 text-slate-400'}`}
+              aria-label="Flip Guest Panel"
+            >
+              <RotateCcw className="w-6 h-6" />
+            </button>
+          </div>
 
-          <div className="relative flex flex-col items-center justify-center -mt-28">
+          {/* Center Column: Microphone & Volume Indicator */}
+          <div className="flex flex-col items-center justify-center relative -mt-28">
             {status === 'translating' && (
               <div className="absolute -top-12 flex items-center gap-2 animate-pulse bg-emerald-500/20 px-4 py-1.5 rounded-full border border-emerald-500/30">
                  <Sparkles className="w-3 h-3 text-emerald-400" />
@@ -539,30 +478,40 @@ RULES:
               </div>
             )}
             
-            <div className="relative">
+            <div className="relative flex flex-col items-center">
               <button 
                 onClick={() => isActive ? stopSession() : startSession()} 
                 disabled={status === 'connecting'} 
-                className={`relative w-32 h-32 rounded-full flex items-center justify-center border-[10px] border-[#030712] transition-all shadow-2xl z-10 ${status === 'connecting' ? 'bg-slate-800' : isActive ? 'bg-red-500 ring-4 ring-red-500/20' : 'bg-[#2563eb] hover:bg-blue-500 ring-4 ring-blue-500/10'}`}>
+                className={`relative w-32 h-32 rounded-full flex items-center justify-center border-[10px] border-[#030712] transition-all shadow-2xl z-10 ${status === 'connecting' ? 'bg-slate-800' : isActive ? 'bg-red-500 ring-4 ring-red-500/20' : 'bg-[#2563eb] hover:bg-blue-500 ring-4 ring-blue-500/10'}`}
+                aria-label={isActive ? "Stop Listening" : "Start Listening"}
+              >
                 {isActive ? <MicOff className="w-10 h-10 text-white" /> : <Mic className="w-10 h-10 text-white" />}
-                
                 {isActive && status !== 'connecting' && (
                    <div className="absolute inset-0 rounded-full border-4 border-white/20 animate-ping" />
                 )}
               </button>
 
-              {/* Input Volume Bar */}
-              {isActive && (
-                <div className="absolute -bottom-10 left-1/2 -translate-x-1/2 w-24 h-1.5 bg-slate-800/80 rounded-full overflow-hidden backdrop-blur-sm border border-white/10">
-                   <div 
-                     className="h-full bg-blue-500 shadow-[0_0_10px_rgba(59,130,246,0.5)] transition-all duration-75 ease-out"
-                     style={{ width: `${Math.min(volumeLevel * 100, 100)}%` }}
-                   />
-                </div>
-              )}
+              {/* Volume Indicator Bar - Anchored to center */}
+              <div className="absolute -bottom-10 flex flex-col items-center w-full">
+                {isActive && (
+                  <div className="w-24 h-1.5 bg-slate-800/80 rounded-full overflow-hidden backdrop-blur-sm border border-white/10">
+                     <div 
+                       className="h-full bg-blue-500 shadow-[0_0_10px_rgba(59,130,246,0.5)] transition-all duration-75 ease-out"
+                       style={{ width: `${Math.min(volumeLevel * 100, 100)}%` }}
+                     />
+                  </div>
+                )}
+              </div>
             </div>
+          </div>
 
-            <button onClick={() => setShowSettings(true)} className="w-14 h-14 rounded-full bg-slate-800/50 flex items-center justify-center text-slate-400 hover:text-white transition-all active:scale-90 border border-white/10">
+          {/* Right Column: Settings */}
+          <div className="flex justify-end">
+            <button 
+              onClick={() => setShowSettings(true)} 
+              className="w-14 h-14 rounded-full bg-slate-800/50 flex items-center justify-center text-slate-400 hover:text-white transition-all active:scale-90 border border-white/10"
+              aria-label="Open Settings"
+            >
               <Settings className="w-6 h-6" />
             </button>
           </div>
@@ -598,12 +547,9 @@ RULES:
            <div className="bg-slate-900 w-full max-w-md rounded-[32px] p-8 border border-white/10 shadow-3xl max-h-full flex flex-col">
               <div className="flex justify-between items-center mb-6 shrink-0">
                  <h2 className="text-xl font-bold">Preferences</h2>
-                 <button onClick={() => setShowSettings(false)} className="p-2 bg-slate-800 rounded-full hover:bg-slate-700 transition-colors"><Trash2 className="w-5 h-5 text-slate-400" /></button>
+                 <button onClick={() => setShowSettings(false)} className="p-2 bg-slate-800 rounded-full hover:bg-slate-700 transition-colors" aria-label="Close Settings"><Trash2 className="w-5 h-5 text-slate-400" /></button>
               </div>
-              
               <div className="space-y-6 overflow-y-auto custom-scrollbar flex-1">
-                
-                {/* INPUT SECTION */}
                 <div>
                   <div className="flex justify-between items-end mb-3">
                      <div className="flex items-center gap-3">
@@ -640,30 +586,25 @@ RULES:
                      ))}
                    </div>
                 </div>
-
-                {/* OUTPUT SECTION */}
                 <div>
                    <label className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-3 block">Speaker (Output)</label>
-                   
-                   {/* iOS Warning */}
                    {audioOutputDevices.length === 0 && hasPermission && (
                      <div className="p-4 bg-slate-800/50 border border-slate-700 rounded-2xl mb-2">
                         <div className="flex gap-3">
                           <Info className="w-5 h-5 text-blue-400 shrink-0" />
                           <div className="text-xs text-slate-300 leading-relaxed">
                             <p className="font-bold text-white mb-1">iPhone / iPad Users:</p>
-                            Apple does not allow web apps to control speaker output directly. To separate audio (e.g. Mic: Headset, Speaker: iPhone):
+                            Apple does not allow web apps to control speaker output directly. To separate audio:
                             <ol className="list-decimal ml-4 mt-2 space-y-1 text-slate-400">
                               <li>Start the session.</li>
-                              <li>Open <strong>Control Center</strong> (Swipe down from top-right).</li>
-                              <li>Tap the <strong>AirPlay/Audio</strong> icon.</li>
-                              <li>Select <strong>iPhone</strong> as the output destination.</li>
+                              <li>Open Control Center.</li>
+                              <li>Tap the AirPlay icon.</li>
+                              <li>Select iPhone as the destination.</li>
                             </ol>
                           </div>
                         </div>
                      </div>
                    )}
-
                    <div className="space-y-2">
                      {audioOutputDevices.map(d => (
                        <button 
@@ -680,9 +621,7 @@ RULES:
                      ))}
                    </div>
                 </div>
-
               </div>
-
               <div className="pt-6 shrink-0">
                 <button onClick={() => setShowSettings(false)} className="w-full bg-white text-black font-black py-4 rounded-2xl uppercase tracking-widest text-xs hover:bg-slate-200 transition-colors shadow-lg active:scale-95 transform duration-150">Done</button>
               </div>
