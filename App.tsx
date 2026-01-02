@@ -15,12 +15,15 @@ import {
   AlertCircle,
   ChevronDown,
   Sparkles,
-  Zap
+  Zap,
+  Check,
+  Volume2,
+  Speaker
 } from 'lucide-react';
 import { SUPPORTED_LANGUAGES, Language } from './types';
 import { decode, decodeAudioData, createBlob } from './utils/audio-utils';
 
-// Brand Logo Component matching the screenshot
+// Brand Logo Component
 const LinguaLogo: React.FC = () => (
   <div className="flex items-center gap-2 bg-[#2563eb] py-2 px-4 rounded-xl shadow-lg border border-white/10">
     <div className="bg-white/20 p-1 rounded-md">
@@ -42,175 +45,370 @@ const App: React.FC = () => {
   const [isFlipped, setIsFlipped] = useState(true);
   
   const [audioInputDevices, setAudioInputDevices] = useState<MediaDeviceInfo[]>([]);
+  const [audioOutputDevices, setAudioOutputDevices] = useState<MediaDeviceInfo[]>([]);
+  const [hasPermission, setHasPermission] = useState(false);
+  
   const [userInputDeviceId, setUserInputDeviceId] = useState<string>('');   
+  const [userOutputDeviceId, setUserOutputDeviceId] = useState<string>('');
+
   const [volumeLevel, setVolumeLevel] = useState(0);
 
   const [liveGuestText, setLiveGuestText] = useState('');
   const [liveUserText, setLiveUserText] = useState('');
 
-  const liveGuestTextRef = useRef('');
-  const liveUserTextRef = useRef('');
-  const isGuestTurnFinished = useRef(false);
-  const isUserTurnFinished = useRef(false);
+  // Audio Context & State Refs
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const processorRef = useRef<ScriptProcessorNode | null>(null);
+  const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const oscillatorRef = useRef<OscillatorNode | null>(null);
   
-  const inCtxRef = useRef<AudioContext | null>(null);
-  const outCtxRef = useRef<AudioContext | null>(null);
   const nextStartTimeRef = useRef<number>(0);
   const sessionRef = useRef<any>(null);
   const streamsRef = useRef<MediaStream[]>([]);
   const activeSources = useRef<Set<AudioBufferSourceNode>>(new Set());
   
+  // Text Processing Refs
   const currentTargetChannel = useRef<'user' | 'guest' | null>(null);
-  const transcriptionBuffer = useRef<string>('');
+  const processingBuffer = useRef<string>('');
+  const currentGuestTextRef = useRef('');
+  const currentUserTextRef = useRef('');
 
   useEffect(() => {
-    refreshDevices();
-    navigator.mediaDevices.addEventListener('devicechange', refreshDevices);
-    return () => navigator.mediaDevices.removeEventListener('devicechange', refreshDevices);
+    // Initial check for permissions/devices
+    checkPermissionsAndEnumerate();
+    navigator.mediaDevices.addEventListener('devicechange', handleDeviceChange);
+    return () => navigator.mediaDevices.removeEventListener('devicechange', handleDeviceChange);
   }, []);
+
+  // Apply output device whenever it changes or context changes
+  useEffect(() => {
+    if (audioCtxRef.current && userOutputDeviceId) {
+      applyOutputDevice(audioCtxRef.current, userOutputDeviceId);
+    }
+  }, [userOutputDeviceId]);
+
+  const handleDeviceChange = useCallback(async () => {
+    await refreshDevices();
+  }, []);
+
+  const checkPermissionsAndEnumerate = async () => {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const hasLabels = devices.some(d => d.label.length > 0);
+      if (hasLabels) {
+        setHasPermission(true);
+        refreshDevices();
+      }
+    } catch (e) {
+      console.warn("Error enumerating devices", e);
+    }
+  };
+
+  const requestPermission = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream.getTracks().forEach(t => t.stop());
+      setHasPermission(true);
+      await refreshDevices();
+    } catch (e) {
+      console.error("Permission denied", e);
+      setErrorMessage("Microphone permission is required to detect Bluetooth devices.");
+    }
+  };
 
   const refreshDevices = async () => {
     try {
       const devices = await navigator.mediaDevices.enumerateDevices();
       const inputs = devices.filter(d => d.kind === 'audioinput');
+      const outputs = devices.filter(d => d.kind === 'audiooutput');
+      
       setAudioInputDevices(inputs);
+      setAudioOutputDevices(outputs);
+
+      // Auto-select Bluetooth Input if not set
       if (!userInputDeviceId && inputs.length > 0) {
-        const bt = inputs.find(i => i.label.toLowerCase().includes('bluetooth') || i.label.toLowerCase().includes('headset'));
+        const bt = inputs.find(i => i.label.toLowerCase().includes('bluetooth') || i.label.toLowerCase().includes('headset') || i.label.toLowerCase().includes('airpods'));
         if (bt) setUserInputDeviceId(bt.deviceId);
+        else setUserInputDeviceId(inputs[0].deviceId);
       }
+
+      // Auto-select Default Output if not set
+      if (!userOutputDeviceId && outputs.length > 0) {
+         const def = outputs.find(o => o.deviceId === 'default');
+         if (def) setUserOutputDeviceId(def.deviceId);
+         else setUserOutputDeviceId(outputs[0].deviceId);
+      }
+
     } catch (e) {}
+  };
+
+  const applyOutputDevice = async (ctx: AudioContext, deviceId: string) => {
+    // @ts-ignore
+    if (typeof ctx.setSinkId === 'function') {
+      try {
+        // @ts-ignore
+        await ctx.setSinkId(deviceId);
+      } catch (e) {
+        console.warn('Failed to set audio output device', e);
+      }
+    }
+  };
+
+  /**
+   * Cleanup only the stream-dependent nodes, keeping the context alive if possible
+   */
+  const cleanupNodes = () => {
+    if (processorRef.current) {
+      processorRef.current.disconnect();
+      processorRef.current.onaudioprocess = null;
+      processorRef.current = null;
+    }
+    if (sourceRef.current) {
+      sourceRef.current.disconnect();
+      sourceRef.current = null;
+    }
+    // Stop tracks
+    streamsRef.current.forEach(s => s.getTracks().forEach(t => t.stop()));
+    streamsRef.current = [];
+    
+    // Clear session
+    sessionRef.current = null;
+  };
+
+  /**
+   * Full reset including context (used for unmounting or critical errors)
+   */
+  const fullDisconnect = async () => {
+    cleanupNodes();
+    
+    if (oscillatorRef.current) {
+      try { oscillatorRef.current.stop(); } catch(e){}
+      oscillatorRef.current = null;
+    }
+
+    if (audioCtxRef.current) {
+      try { await audioCtxRef.current.close(); } catch(e) {}
+      audioCtxRef.current = null;
+    }
+    
+    activeSources.current.forEach(s => { try { s.stop(); } catch(e) {} });
+    activeSources.current.clear();
+    processingBuffer.current = '';
+    nextStartTimeRef.current = 0;
   };
 
   const stopSession = useCallback(async () => {
     setIsActive(false);
-    try {
-      if (inCtxRef.current && inCtxRef.current.state !== 'closed') {
-        await inCtxRef.current.close().catch(() => {});
-      }
-      if (outCtxRef.current && outCtxRef.current.state !== 'closed') {
-        await outCtxRef.current.close().catch(() => {});
-      }
-      streamsRef.current.forEach(s => s.getTracks().forEach(t => t.stop()));
-      activeSources.current.forEach(s => { try { s.stop(); } catch(e) {} });
-      activeSources.current.clear();
-      streamsRef.current = [];
-    } catch (e) {}
+    await fullDisconnect();
     setStatus('idle');
     setLiveGuestText('');
     setLiveUserText('');
-    liveGuestTextRef.current = '';
-    liveUserTextRef.current = '';
-    isUserTurnFinished.current = false;
-    isGuestTurnFinished.current = false;
+    currentGuestTextRef.current = '';
+    currentUserTextRef.current = '';
     setVolumeLevel(0);
-    sessionRef.current = null;
-    nextStartTimeRef.current = 0;
     currentTargetChannel.current = null;
-    transcriptionBuffer.current = '';
   }, []);
 
-  const startSession = async () => {
+  const downsampleTo16k = (inputData: Float32Array, inputSampleRate: number): Float32Array => {
+    if (inputSampleRate === 16000) return inputData;
+    const ratio = inputSampleRate / 16000;
+    const newLength = Math.round(inputData.length / ratio);
+    const result = new Float32Array(newLength);
+    for (let i = 0; i < newLength; i++) {
+      const originalIndex = i * ratio;
+      const index1 = Math.floor(originalIndex);
+      const index2 = Math.min(index1 + 1, inputData.length - 1);
+      const fraction = originalIndex - index1;
+      result[i] = inputData[index1] * (1 - fraction) + inputData[index2] * fraction;
+    }
+    return result;
+  };
+
+  const startSession = async (inputDeviceIdOverride?: string, outputDeviceIdOverride?: string) => {
+    // We do NOT fully disconnect here to preserve the AudioContext gesture token.
+    // Instead, we clean up the nodes and streams, then re-initialize the graph.
+    cleanupNodes();
+
     try {
       setStatus('connecting');
       setErrorMessage('');
-      streamsRef.current.forEach(s => s.getTracks().forEach(t => t.stop()));
-
-      const constraints = {
-        audio: userInputDeviceId 
-          ? { deviceId: { exact: userInputDeviceId }, echoCancellation: true, noiseSuppression: true } 
-          : { echoCancellation: true, noiseSuppression: true }
-      };
       
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      const targetInputId = inputDeviceIdOverride || userInputDeviceId;
+      const targetOutputId = outputDeviceIdOverride || userOutputDeviceId;
+      
+      // --- AUDIO CONTEXT SETUP (Reuse or Create) ---
+      let ctx = audioCtxRef.current;
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      
+      if (!ctx || ctx.state === 'closed') {
+        ctx = new AudioContextClass({ latencyHint: 'interactive' });
+        audioCtxRef.current = ctx;
+      }
+      
+      // Always try to resume (required for iOS after interruptions)
+      if (ctx.state === 'suspended') {
+        await ctx.resume();
+      }
+
+      // --- KEEP-ALIVE OSCILLATOR (If not running) ---
+      if (!oscillatorRef.current) {
+         try {
+            const silentOsc = ctx.createOscillator();
+            const silentGain = ctx.createGain();
+            silentOsc.type = 'sine';
+            silentOsc.frequency.value = 440; 
+            silentGain.gain.value = 0.0001; 
+            silentOsc.connect(silentGain);
+            silentGain.connect(ctx.destination);
+            silentOsc.start();
+            oscillatorRef.current = silentOsc;
+         } catch (e) { console.warn("Oscillator failed", e); }
+      }
+
+      // --- INPUT CONSTRAINT STRATEGY ---
+      let stream: MediaStream | null = null;
+      const constraintsPreferences = [
+         // 1. Try exact ID
+         { audio: { deviceId: targetInputId ? { exact: targetInputId } : undefined, channelCount: 1, echoCancellation: true, autoGainControl: true, noiseSuppression: true }},
+         // 2. Try ideal ID
+         { audio: { deviceId: targetInputId ? { ideal: targetInputId } : undefined, channelCount: 1, echoCancellation: true }},
+         // 3. Fallback to any mic
+         { audio: { echoCancellation: true }}
+      ];
+
+      for (const constraint of constraintsPreferences) {
+         try {
+            // Skip if this preference requires an ID but we don't have one
+            if (targetInputId && !constraint.audio.deviceId && !constraint.audio.echoCancellation) continue;
+            
+            stream = await navigator.mediaDevices.getUserMedia(constraint);
+            console.log("Connected with constraints:", JSON.stringify(constraint));
+            break; 
+         } catch (e) {
+            console.log("Constraint failed:", constraint);
+            stream = null;
+         }
+      }
+
+      if (!stream) throw new Error("Could not access microphone.");
       streamsRef.current = [stream];
 
-      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-      const inCtx = new AudioContextClass({ sampleRate: 16000 });
-      const outCtx = new AudioContextClass();
-      
-      inCtxRef.current = inCtx;
-      outCtxRef.current = outCtx;
+      // --- OUTPUT ROUTING ---
+      if (targetOutputId) {
+        await applyOutputDevice(ctx, targetOutputId);
+      }
 
-      // Create a new GoogleGenAI instance right before connecting to the session
+      // --- GEMINI CONNECTION ---
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       const sessionPromise = ai.live.connect({
         model: 'gemini-2.5-flash-native-audio-preview-09-2025',
         callbacks: {
           onopen: () => {
             setStatus('listening');
-            const proc = inCtx.createScriptProcessor(4096, 1, 1);
-            inCtx.createMediaStreamSource(stream).connect(proc);
+            if (!ctx) return; 
+
+            // Create new nodes
+            const source = ctx.createMediaStreamSource(stream!);
+            const processor = ctx.createScriptProcessor(4096, 1, 1);
+            
+            // Store references for cleanup
+            sourceRef.current = source;
+            processorRef.current = processor;
+
+            source.connect(processor);
+            processor.connect(ctx.destination);
+
             let lastVolumeUpdate = 0;
-            proc.onaudioprocess = (e) => {
+            const NOISE_GATE_THRESHOLD = 0.01;
+
+            processor.onaudioprocess = (e) => {
               const inputData = e.inputBuffer.getChannelData(0);
+              const outputData = e.outputBuffer.getChannelData(0);
+
+              // 1. Viz
               let sum = 0;
               for (let i = 0; i < inputData.length; i++) sum += inputData[i] * inputData[i];
               const rms = Math.sqrt(sum / inputData.length);
               const now = Date.now();
+              // Update more frequently for smoother bar (50ms)
               if (now - lastVolumeUpdate > 50) {
-                 setVolumeLevel(Math.min(rms * 5, 1));
+                 // Increased sensitivity (x10) for bar visibility
+                 setVolumeLevel(Math.min(rms * 10, 1));
                  lastVolumeUpdate = now;
               }
-              // Solely rely on sessionPromise resolves to send realtime input to prevent race conditions
-              sessionPromise.then((session) => {
-                session.sendRealtimeInput({ media: createBlob(inputData) });
-              });
+
+              // 2. Mute Local Output
+              for (let i = 0; i < outputData.length; i++) outputData[i] = 0; 
+
+              // 3. Send to AI
+              if (ctx) {
+                const downsampledData = downsampleTo16k(inputData, ctx.sampleRate);
+                sessionPromise.then((session) => {
+                  if (rms > NOISE_GATE_THRESHOLD) {
+                    session.sendRealtimeInput({ media: createBlob(downsampledData) });
+                  } else {
+                    session.sendRealtimeInput({ media: createBlob(new Float32Array(downsampledData.length)) });
+                  }
+                });
+              }
             };
-            proc.connect(inCtx.destination);
           },
           onmessage: async (message: LiveServerMessage) => {
-            // Process model's audio transcription (translation text)
             if (message.serverContent?.outputTranscription) {
-              const textChunk = message.serverContent.outputTranscription.text;
-              transcriptionBuffer.current += textChunk;
-              const cleanText = (txt: string) => txt.replace(/USER_CHANNEL:|GUEST_CHANNEL:/g, '').replace(/\n/g, ' ').trim();
+              const chunk = message.serverContent.outputTranscription.text;
+              processingBuffer.current += chunk;
+              
+              while (true) {
+                const userTagIndex = processingBuffer.current.indexOf('[TO_USER]');
+                const guestTagIndex = processingBuffer.current.indexOf('[TO_GUEST]');
+                let foundIndex = -1;
+                let foundTag = '';
 
-              if (transcriptionBuffer.current.includes('USER_CHANNEL:')) {
-                currentTargetChannel.current = 'user';
-                const parts = transcriptionBuffer.current.split('USER_CHANNEL:');
-                const actualText = cleanText(parts[parts.length - 1]);
-                setLiveUserText(actualText);
-                liveUserTextRef.current = actualText;
-                isUserTurnFinished.current = false;
-              } 
-              else if (transcriptionBuffer.current.includes('GUEST_CHANNEL:')) {
-                currentTargetChannel.current = 'guest';
-                const parts = transcriptionBuffer.current.split('GUEST_CHANNEL:');
-                const actualText = cleanText(parts[parts.length - 1]);
-                setLiveGuestText(actualText);
-                liveGuestTextRef.current = actualText;
-                isGuestTurnFinished.current = false;
-              } 
-              else if (currentTargetChannel.current === 'user') {
-                if (isUserTurnFinished.current) {
-                  setLiveUserText('');
-                  liveUserTextRef.current = '';
-                  isUserTurnFinished.current = false;
+                if (userTagIndex !== -1 && (guestTagIndex === -1 || userTagIndex < guestTagIndex)) {
+                  foundIndex = userTagIndex; foundTag = '[TO_USER]';
+                } else if (guestTagIndex !== -1) {
+                  foundIndex = guestTagIndex; foundTag = '[TO_GUEST]';
                 }
-                const newText = cleanText(liveUserTextRef.current + textChunk);
-                setLiveUserText(newText);
-                liveUserTextRef.current = newText;
-              } 
-              else if (currentTargetChannel.current === 'guest') {
-                if (isGuestTurnFinished.current) {
-                  setLiveGuestText('');
-                  liveGuestTextRef.current = '';
-                  isGuestTurnFinished.current = false;
+
+                if (foundIndex === -1) {
+                  if (currentTargetChannel.current && processingBuffer.current.length > 0) {
+                     const text = processingBuffer.current;
+                     if (currentTargetChannel.current === 'user') {
+                        currentUserTextRef.current += text;
+                        setLiveUserText(currentUserTextRef.current);
+                     } else {
+                        currentGuestTextRef.current += text;
+                        setLiveGuestText(currentGuestTextRef.current);
+                     }
+                     processingBuffer.current = ''; 
+                  }
+                  break; 
                 }
-                const newText = cleanText(liveGuestTextRef.current + textChunk);
-                setLiveGuestText(newText);
-                liveGuestTextRef.current = newText;
+
+                const preText = processingBuffer.current.substring(0, foundIndex);
+                if (preText.length > 0 && currentTargetChannel.current) {
+                   if (currentTargetChannel.current === 'user') {
+                      currentUserTextRef.current += preText;
+                      setLiveUserText(currentUserTextRef.current);
+                   } else {
+                      currentGuestTextRef.current += preText;
+                      setLiveGuestText(currentGuestTextRef.current);
+                   }
+                }
+
+                if (foundTag === '[TO_USER]') {
+                   currentTargetChannel.current = 'user';
+                   currentUserTextRef.current = ''; 
+                   setLiveUserText('');
+                } else {
+                   currentTargetChannel.current = 'guest';
+                   currentGuestTextRef.current = ''; 
+                   setLiveGuestText('');
+                }
+                processingBuffer.current = processingBuffer.current.substring(foundIndex + foundTag.length);
               }
             }
 
-            // Handle turn completion to reset transcription states
-            if (message.serverContent?.turnComplete) {
-              transcriptionBuffer.current = '';
-              if (currentTargetChannel.current === 'user') isUserTurnFinished.current = true;
-              else if (currentTargetChannel.current === 'guest') isGuestTurnFinished.current = true;
-            }
-
-            // Handle session interruptions by stopping active audio playback
             if (message.serverContent?.interrupted) {
               activeSources.current.forEach(s => { try { s.stop(); } catch(e) {} });
               activeSources.current.clear();
@@ -218,17 +416,17 @@ const App: React.FC = () => {
               setStatus('listening');
             }
 
-            // Extract and play audio content from the model turn
             const base64 = message.serverContent?.modelTurn?.parts?.find(p => p.inlineData)?.inlineData?.data;
-            if (base64 && outCtxRef.current) {
-              const ctx = outCtxRef.current;
-              nextStartTimeRef.current = Math.max(nextStartTimeRef.current, ctx.currentTime);
+            if (base64 && audioCtxRef.current) {
+              const ctx = audioCtxRef.current;
+              // Sync time if we fell behind or reset
+              if (nextStartTimeRef.current < ctx.currentTime) nextStartTimeRef.current = ctx.currentTime;
+              
               const audioBuffer = await decodeAudioData(decode(base64), ctx, 24000, 1);
               const source = ctx.createBufferSource();
               source.buffer = audioBuffer;
               source.connect(ctx.destination);
               
-              // Schedule each chunk to start at the exact end of the previous one for gapless playback
               source.start(nextStartTimeRef.current);
               nextStartTimeRef.current += audioBuffer.duration;
               activeSources.current.add(source);
@@ -240,10 +438,18 @@ const App: React.FC = () => {
               };
             }
           },
+          onclose: () => {
+             // Just reset status, don't kill context unless user requested stop
+             if (isActive) {
+               console.log("Socket closed unexpectedly");
+               setStatus('error');
+               setErrorMessage("Connection lost");
+             }
+          },
           onerror: (e) => {
-            console.error('Session error:', e);
+            console.error(e);
             setStatus('error');
-            setErrorMessage('A communication error occurred with the translation service.');
+            setErrorMessage('Connection Error');
           },
         },
         config: {
@@ -251,20 +457,38 @@ const App: React.FC = () => {
           speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } },
           inputAudioTranscription: {},
           outputAudioTranscription: {},
-          systemInstruction: `You are a professional bi-directional translator. 
-User Language: ${userLang.name}. Guest Language: ${guestLang.name}.
-Detect the language. Translate. Always start with "GUEST_CHANNEL: " or "USER_CHANNEL: ". 
-Only translate, no chat. Keep translations concise and clear.`,
+          systemInstruction: `You are a simultaneous interpreter.
+User Language: ${userLang.name}.
+Guest Language: ${guestLang.name}.
+RULES:
+1. When you hear ${userLang.name}, translate to ${guestLang.name}. START with "[TO_GUEST]".
+2. When you hear ${guestLang.name}, translate to ${userLang.name}. START with "[TO_USER]".
+3. Do not chat. Only translate.`,
         }
       });
       sessionRef.current = await sessionPromise;
       setIsActive(true);
-      return sessionRef.current;
     } catch (e: any) { 
-      stopSession(); 
+      // Only if we failed to start, we might want to cleanup
+      cleanupNodes();
       setStatus('error'); 
-      setErrorMessage(e?.message || 'Microphone Access Denied'); 
-      return null;
+      setErrorMessage(e?.message || 'Mic Access Denied'); 
+    }
+  };
+
+  const handleInputSelection = async (deviceId: string) => {
+    setUserInputDeviceId(deviceId);
+    if (isActive) {
+      // HOT SWAP: Do not use setTimeout. Do not use stopSession().
+      // Call startSession directly to swap the stream while keeping context alive.
+      await startSession(deviceId, userOutputDeviceId);
+    }
+  };
+
+  const handleOutputSelection = async (deviceId: string) => {
+    setUserOutputDeviceId(deviceId);
+    if (audioCtxRef.current) {
+      await applyOutputDevice(audioCtxRef.current, deviceId);
     }
   };
 
@@ -317,7 +541,7 @@ Only translate, no chat. Keep translations concise and clear.`,
             
             <div className="relative">
               <button 
-                onClick={isActive ? stopSession : startSession} 
+                onClick={() => isActive ? stopSession() : startSession()} 
                 disabled={status === 'connecting'} 
                 className={`relative w-32 h-32 rounded-full flex items-center justify-center border-[10px] border-[#030712] transition-all shadow-2xl z-10 ${status === 'connecting' ? 'bg-slate-800' : isActive ? 'bg-red-500 ring-4 ring-red-500/20' : 'bg-[#2563eb] hover:bg-blue-500 ring-4 ring-blue-500/10'}`}>
                 {isActive ? <MicOff className="w-10 h-10 text-white" /> : <Mic className="w-10 h-10 text-white" />}
@@ -327,12 +551,12 @@ Only translate, no chat. Keep translations concise and clear.`,
                 )}
               </button>
 
-              {/* Volume Visualizer */}
+              {/* Input Volume Bar */}
               {isActive && (
-                <div className="absolute -inset-4 rounded-full border-2 border-white/5 flex items-center justify-center pointer-events-none">
+                <div className="absolute -bottom-10 left-1/2 -translate-x-1/2 w-24 h-1.5 bg-slate-800/80 rounded-full overflow-hidden backdrop-blur-sm border border-white/10">
                    <div 
-                    className="w-full h-full rounded-full border-2 border-blue-500/30 transition-transform duration-75"
-                    style={{ transform: `scale(${1 + volumeLevel})` }}
+                     className="h-full bg-blue-500 shadow-[0_0_10px_rgba(59,130,246,0.5)] transition-all duration-75 ease-out"
+                     style={{ width: `${Math.min(volumeLevel * 100, 100)}%` }}
                    />
                 </div>
               )}
@@ -371,28 +595,96 @@ Only translate, no chat. Keep translations concise and clear.`,
       {/* Settings Modal */}
       {showSettings && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 backdrop-blur-xl bg-black/60">
-           <div className="bg-slate-900 w-full max-w-sm rounded-[32px] p-8 border border-white/10 shadow-3xl">
-              <div className="flex justify-between items-center mb-8">
+           <div className="bg-slate-900 w-full max-w-md rounded-[32px] p-8 border border-white/10 shadow-3xl max-h-full flex flex-col">
+              <div className="flex justify-between items-center mb-6 shrink-0">
                  <h2 className="text-xl font-bold">Preferences</h2>
                  <button onClick={() => setShowSettings(false)} className="p-2 bg-slate-800 rounded-full hover:bg-slate-700 transition-colors"><Trash2 className="w-5 h-5 text-slate-400" /></button>
               </div>
               
-              <div className="space-y-6">
+              <div className="space-y-6 overflow-y-auto custom-scrollbar flex-1">
+                
+                {/* INPUT SECTION */}
                 <div>
-                   <label className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-3 block">Audio Input</label>
-                   <div className="space-y-2 max-h-60 overflow-y-auto pr-2">
+                  <div className="flex justify-between items-end mb-3">
+                     <div className="flex items-center gap-3">
+                       <label className="text-[10px] font-black uppercase tracking-widest text-slate-500 block">Microphone (Input)</label>
+                       {isActive && (
+                          <div className="w-12 h-1 bg-slate-800 rounded-full overflow-hidden">
+                             <div 
+                                className="h-full bg-blue-500 transition-all duration-75"
+                                style={{ width: `${Math.min(volumeLevel * 100, 100)}%` }}
+                             />
+                          </div>
+                       )}
+                     </div>
+                     {!hasPermission && (
+                       <button onClick={requestPermission} className="text-[10px] font-bold text-blue-400 hover:text-blue-300">Grant Permission</button>
+                     )}
+                  </div>
+                   <div className="space-y-2">
                      {audioInputDevices.map(d => (
-                       <button key={d.deviceId} onClick={() => setUserInputDeviceId(d.deviceId)} className={`w-full text-left p-4 rounded-2xl border transition-all flex items-center gap-3 ${userInputDeviceId === d.deviceId ? 'bg-blue-600 border-blue-400 shadow-[0_0_20px_rgba(37,99,235,0.3)] text-white' : 'bg-slate-800 border-transparent text-slate-400 hover:bg-slate-700'}`}>
-                         {d.label.toLowerCase().includes('bluetooth') ? <Bluetooth className="w-5 h-5" /> : <Headphones className="w-5 h-5" />}
-                         <span className="text-sm font-medium truncate">{d.label || 'Default Input'}</span>
+                       <button 
+                         key={d.deviceId} 
+                         onClick={() => handleInputSelection(d.deviceId)} 
+                         className={`w-full text-left p-4 rounded-2xl border transition-all flex items-center justify-between gap-3 group ${userInputDeviceId === d.deviceId ? 'bg-blue-600 border-blue-400 shadow-[0_0_20px_rgba(37,99,235,0.3)] text-white' : 'bg-slate-800 border-transparent text-slate-400 hover:bg-slate-700 hover:text-slate-200'}`}
+                       >
+                         <div className="flex items-center gap-3 overflow-hidden">
+                           {d.label.toLowerCase().includes('bluetooth') || d.label.toLowerCase().includes('headset') 
+                              ? <Bluetooth className={`w-5 h-5 ${userInputDeviceId === d.deviceId ? 'text-white' : 'text-blue-400'}`} /> 
+                              : <Mic className="w-5 h-5" />
+                           }
+                           <span className="text-sm font-medium truncate">{d.label || `Mic ${d.deviceId.slice(0, 5)}`}</span>
+                         </div>
+                         {userInputDeviceId === d.deviceId && <Check className="w-4 h-4 text-white" />}
                        </button>
                      ))}
                    </div>
                 </div>
 
-                <div className="pt-4 flex gap-3">
-                  <button onClick={() => setShowSettings(false)} className="flex-1 bg-white text-black font-black py-4 rounded-2xl uppercase tracking-widest text-xs hover:bg-slate-200 transition-colors">Done</button>
+                {/* OUTPUT SECTION */}
+                <div>
+                   <label className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-3 block">Speaker (Output)</label>
+                   
+                   {/* iOS Warning */}
+                   {audioOutputDevices.length === 0 && hasPermission && (
+                     <div className="p-4 bg-slate-800/50 border border-slate-700 rounded-2xl mb-2">
+                        <div className="flex gap-3">
+                          <Info className="w-5 h-5 text-blue-400 shrink-0" />
+                          <div className="text-xs text-slate-300 leading-relaxed">
+                            <p className="font-bold text-white mb-1">iPhone / iPad Users:</p>
+                            Apple does not allow web apps to control speaker output directly. To separate audio (e.g. Mic: Headset, Speaker: iPhone):
+                            <ol className="list-decimal ml-4 mt-2 space-y-1 text-slate-400">
+                              <li>Start the session.</li>
+                              <li>Open <strong>Control Center</strong> (Swipe down from top-right).</li>
+                              <li>Tap the <strong>AirPlay/Audio</strong> icon.</li>
+                              <li>Select <strong>iPhone</strong> as the output destination.</li>
+                            </ol>
+                          </div>
+                        </div>
+                     </div>
+                   )}
+
+                   <div className="space-y-2">
+                     {audioOutputDevices.map(d => (
+                       <button 
+                         key={d.deviceId} 
+                         onClick={() => handleOutputSelection(d.deviceId)} 
+                         className={`w-full text-left p-4 rounded-2xl border transition-all flex items-center justify-between gap-3 group ${userOutputDeviceId === d.deviceId ? 'bg-emerald-600 border-emerald-400 shadow-[0_0_20px_rgba(16,185,129,0.3)] text-white' : 'bg-slate-800 border-transparent text-slate-400 hover:bg-slate-700 hover:text-slate-200'}`}
+                       >
+                         <div className="flex items-center gap-3 overflow-hidden">
+                           <Speaker className={`w-5 h-5 ${userOutputDeviceId === d.deviceId ? 'text-white' : 'text-emerald-400'}`} />
+                           <span className="text-sm font-medium truncate">{d.label || `Speaker ${d.deviceId.slice(0, 5)}`}</span>
+                         </div>
+                         {userOutputDeviceId === d.deviceId && <Check className="w-4 h-4 text-white" />}
+                       </button>
+                     ))}
+                   </div>
                 </div>
+
+              </div>
+
+              <div className="pt-6 shrink-0">
+                <button onClick={() => setShowSettings(false)} className="w-full bg-white text-black font-black py-4 rounded-2xl uppercase tracking-widest text-xs hover:bg-slate-200 transition-colors shadow-lg active:scale-95 transform duration-150">Done</button>
               </div>
            </div>
         </div>
@@ -405,9 +697,9 @@ Only translate, no chat. Keep translations concise and clear.`,
                <div className="bg-red-500/20 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-6">
                   <AlertCircle className="w-8 h-8 text-red-500" />
                </div>
-               <h3 className="text-xl font-bold mb-2">Mic Error</h3>
+               <h3 className="text-xl font-bold mb-2">Connection Error</h3>
                <p className="text-slate-400 text-sm mb-8 leading-relaxed">{errorMessage}</p>
-               <button onClick={startSession} className="w-full bg-red-500 py-4 rounded-2xl font-black uppercase tracking-widest text-xs flex items-center justify-center gap-2 hover:bg-red-400 transition-colors">
+               <button onClick={() => startSession()} className="w-full bg-red-500 py-4 rounded-2xl font-black uppercase tracking-widest text-xs flex items-center justify-center gap-2 hover:bg-red-400 transition-colors">
                  <RefreshCw className="w-4 h-4" /> Retry
                </button>
             </div>
